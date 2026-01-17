@@ -1,14 +1,5 @@
 {
     "cash": 25000,
-    "holdings": [
-        {
-            "symbol": "VEDL",
-            "shares": 18
-        },
-        {
-            "symbol": "SHRIRAMFIN",
-            "shares": 12
-        }
-    ],
-    "last_update_id": 901159279
+    "holdings": [],
+    "last_update_id": 901159281
 }
