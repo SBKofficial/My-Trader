@@ -6,8 +6,9 @@ import json
 import os
 import io
 import subprocess
+from datetime import datetime
 
-# --- LOAD SECRETS (From GitHub Actions) ---
+# --- LOAD SECRETS ---
 TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
@@ -21,7 +22,6 @@ def send_telegram(message):
     requests.post(url, json=payload)
 
 def git_commit_push(message):
-    """Commits the updated portfolio.json back to GitHub"""
     subprocess.run(["git", "config", "--global", "user.email", "actions@github.com"])
     subprocess.run(["git", "config", "--global", "user.name", "Trading Bot"])
     subprocess.run(["git", "add", PORTFOLIO_FILE])
@@ -39,22 +39,17 @@ def save_portfolio(data):
         json.dump(data, f, indent=4)
 
 def check_telegram_commands(portfolio):
-    """Reads Telegram for /BUY, /SELL, /RESET commands"""
     last_id = portfolio.get('last_update_id', 0)
     url = f"https://api.telegram.org/bot{TOKEN}/getUpdates?offset={last_id + 1}"
-    
     try:
         response = requests.get(url).json()
-    except: 
-        return portfolio, False # Fail silently if network issue
+    except: return portfolio, False
 
     changes_made = False
-    
     for item in response.get('result', []):
         update_id = item['update_id']
         message = item.get('message', {}).get('text', '').strip().upper()
         
-        # COMMAND 1: /BUY SYMBOL SHARES (e.g., /BUY VEDL 18)
         if message.startswith('/BUY'):
             parts = message.split()
             if len(parts) >= 3:
@@ -64,7 +59,6 @@ def check_telegram_commands(portfolio):
                 changes_made = True
                 send_telegram(f"✅ *System Updated:* Added {shares} shares of {symbol}.")
 
-        # COMMAND 2: /SELL SYMBOL (e.g., /SELL VEDL)
         elif message.startswith('/SELL'):
             parts = message.split()
             if len(parts) >= 2:
@@ -75,13 +69,11 @@ def check_telegram_commands(portfolio):
                     changes_made = True
                     send_telegram(f"✅ *System Updated:* Removed {symbol} from holdings.")
         
-        # COMMAND 3: /RESET (Emergency wipe)
         elif message == '/RESET':
             portfolio['holdings'] = []
             changes_made = True
             send_telegram(f"⚠️ *System Reset:* All holdings cleared.")
 
-        # Update ID to prevent re-reading old messages
         portfolio['last_update_id'] = update_id
 
     return portfolio, changes_made
@@ -97,25 +89,24 @@ def get_nifty100_live():
         return ["RELIANCE.NS", "HDFCBANK.NS", "INFY.NS", "TCS.NS", "ITC.NS"]
 
 def main():
-    # --- PHASE 1: SYNC (Read Telegram -> Git Push) ---
+    # PHASE 1: SYNC
     portfolio = load_portfolio()
     portfolio, updated = check_telegram_commands(portfolio)
-    
     if updated:
         save_portfolio(portfolio)
-        try:
-            git_commit_push("Auto-update portfolio from Telegram")
-        except Exception as e:
-            print(f"Git push failed (non-critical): {e}")
+        try: git_commit_push("Auto-update")
+        except: pass
 
-    # --- PHASE 2: ANALYSIS (The Morning Scan) ---
+    # PHASE 2: ANALYSIS
     holdings = portfolio['holdings']
     my_symbols = [x['symbol'] for x in holdings]
-    
     tickers = get_nifty100_live()
     all_tickers = list(set(tickers + [f"{s}.NS" for s in my_symbols]))
     
-    # Download Data (2 Years for valid 200 DMA)
+    # Check if we are in the "Rebalance Window" (First 7 days of month)
+    today = datetime.now()
+    is_rebalance_period = today.day <= 7
+    
     data = yf.download(all_tickers, period="2y", group_by='ticker', progress=False)
     nifty = yf.download("^NSEI", period="2y", progress=False)
     
@@ -123,12 +114,29 @@ def main():
     nifty['SMA_200'] = ta.sma(nifty['Close'], length=200)
     market_safe = nifty['Close'].iloc[-1] > nifty['SMA_200'].iloc[-1]
     
+    # Calculate Ranks for Top 15 Check
+    rank_scores = {}
+    for t in tickers:
+        try:
+            df = data[t].copy()
+            if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+            score = df['Close'].pct_change(periods=21).iloc[-1] * 100
+            rank_scores[t.replace('.NS','')] = score
+        except: continue
+    
+    # Sort and get Top 15
+    sorted_ranks = sorted(rank_scores.items(), key=lambda x: x[1], reverse=True)
+    top_15 = [x[0] for x in sorted_ranks[:15]]
+
     report = []
-    report.append(f"📅 *Report for {pd.Timestamp.now().strftime('%d %b %Y')}*")
+    report.append(f"📅 *Report for {today.strftime('%d %b %Y')}*")
     report.append(f"Market Status: {'✅ GREEN' if market_safe else '⛔ RED (EXIT ALL)'}")
+    if is_rebalance_period:
+        report.append("🔄 *Monthly Check: ACTIVE*")
+    else:
+        report.append("🛡️ *Daily Safety Check Only*")
     report.append("------------------------")
     
-    # Check Holdings
     if holdings:
         report.append("*🔍 YOUR POSITIONS:*")
         for h in holdings:
@@ -139,10 +147,13 @@ def main():
                 current = df['Close'].iloc[-1]
                 sma = ta.sma(df['Close'], length=200).iloc[-1]
                 
+                # THE 3 RULES
                 if not market_safe:
                     report.append(f"🚨 SELL {sym} (Market Crash)")
                 elif current < sma:
                     report.append(f"❌ SELL {sym} (Trend Broken)")
+                elif is_rebalance_period and sym not in top_15:
+                    report.append(f"❌ SELL {sym} (Rank Drop - Out of Top 15)")
                 else:
                     report.append(f"✅ HOLD {sym} (₹{int(current)})")
             except:
@@ -150,39 +161,25 @@ def main():
     else:
         report.append("ℹ️ Portfolio Empty.")
 
-    # Recommendations (Only if slots open)
     if market_safe and len(holdings) < MAX_POSITIONS:
         report.append("------------------------")
-        report.append("*🚀 BUY SIGNALS (Top 2):*")
-        candidates = []
-        for t in tickers:
-            try:
-                df = data[t].copy()
-                if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-                df.dropna(subset=['Close'], inplace=True)
-                if len(df) < 250: continue
-                close = df['Close'].iloc[-1]
-                sma = ta.sma(df['Close'], length=200).iloc[-1]
-                score = df['Close'].pct_change(periods=21).iloc[-1] * 100
-                
-                # Filter: Price > 200 DMA
-                if close > sma:
-                    candidates.append({'symbol': t.replace('.NS',''), 'score': score})
-            except: continue
-        
-        candidates.sort(key=lambda x: x['score'], reverse=True)
-        
+        report.append("*🚀 BUY SIGNALS:*")
         count = 0
-        for c in candidates:
+        for stock, score in sorted_ranks:
             if count >= 2: break
-            if c['symbol'] not in my_symbols:
-                report.append(f"👉 {c['symbol']} (Score: {c['score']:.1f}%)")
-                count += 1
-                
+            if stock not in my_symbols:
+                # Double check 200 DMA for buy candidate
+                try:
+                    df = data[f"{stock}.NS"].copy()
+                    if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+                    if df['Close'].iloc[-1] > ta.sma(df['Close'], length=200).iloc[-1]:
+                        report.append(f"👉 {stock} (Score: {score:.1f}%)")
+                        count += 1
+                except: continue
+
     final_msg = "\n".join(report)
     print(final_msg)
     send_telegram(final_msg)
 
 if __name__ == "__main__":
     main()
-
