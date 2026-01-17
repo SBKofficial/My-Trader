@@ -17,9 +17,12 @@ MAX_POSITIONS = 2
 PORTFOLIO_FILE = 'portfolio.json'
 
 def send_telegram(message):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"}
-    requests.post(url, json=payload)
+    try:
+        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+        payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"}
+        requests.post(url, json=payload, timeout=10)
+    except Exception as e:
+        print(f"Telegram Error: {e}")
 
 def git_commit_push(message):
     subprocess.run(["git", "config", "--global", "user.email", "actions@github.com"])
@@ -42,7 +45,7 @@ def check_telegram_commands(portfolio):
     last_id = portfolio.get('last_update_id', 0)
     url = f"https://api.telegram.org/bot{TOKEN}/getUpdates?offset={last_id + 1}"
     try:
-        response = requests.get(url).json()
+        response = requests.get(url, timeout=10).json()
     except: return portfolio, False
 
     changes_made = False
@@ -82,9 +85,11 @@ def get_nifty100_live():
     try:
         url = "https://nsearchives.nseindia.com/content/indices/ind_nifty100list.csv"
         headers = {"User-Agent": "Mozilla/5.0"}
-        response = requests.get(url, headers=headers)
+        response = requests.get(url, headers=headers, timeout=10)
         df = pd.read_csv(io.BytesIO(response.content))
-        return [f"{x}.NS" for x in df['Symbol'].tolist()]
+        # Filter out "DUMMY" or other bad tickers
+        tickers = [f"{x}.NS" for x in df['Symbol'].tolist() if "DUMMY" not in str(x).upper()]
+        return tickers
     except:
         return ["RELIANCE.NS", "HDFCBANK.NS", "INFY.NS", "TCS.NS", "ITC.NS"]
 
@@ -103,38 +108,43 @@ def main():
     tickers = get_nifty100_live()
     all_tickers = list(set(tickers + [f"{s}.NS" for s in my_symbols]))
     
-    # Check if we are in the "Rebalance Window" (First 7 days of month)
+    # Identify Schedule
     today = datetime.now()
     is_rebalance_period = today.day <= 7
     
-    data = yf.download(all_tickers, period="2y", group_by='ticker', progress=False)
+    # Download Data (Robust)
+    # Using 'threads=False' is slower but more stable if you are getting 404 errors
+    data = yf.download(all_tickers, period="2y", group_by='ticker', progress=False, threads=True)
     nifty = yf.download("^NSEI", period="2y", progress=False)
     
     if isinstance(nifty.columns, pd.MultiIndex): nifty.columns = nifty.columns.get_level_values(0)
     nifty['SMA_200'] = ta.sma(nifty['Close'], length=200)
     market_safe = nifty['Close'].iloc[-1] > nifty['SMA_200'].iloc[-1]
     
-    # Calculate Ranks for Top 15 Check
+    # Calculate Ranks
     rank_scores = {}
     for t in tickers:
         try:
             df = data[t].copy()
             if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-            score = df['Close'].pct_change(periods=21).iloc[-1] * 100
+            
+            # --- SAFETY CHECKS ---
+            df.dropna(subset=['Close'], inplace=True)
+            if len(df) < 250: continue 
+            
+            # FIX: Added fill_method=None to silence warning
+            score = df['Close'].pct_change(periods=21, fill_method=None).iloc[-1] * 100
             rank_scores[t.replace('.NS','')] = score
         except: continue
     
-    # Sort and get Top 15
     sorted_ranks = sorted(rank_scores.items(), key=lambda x: x[1], reverse=True)
     top_15 = [x[0] for x in sorted_ranks[:15]]
 
+    # BUILD REPORT
     report = []
     report.append(f"📅 *Report for {today.strftime('%d %b %Y')}*")
     report.append(f"Market Status: {'✅ GREEN' if market_safe else '⛔ RED (EXIT ALL)'}")
-    if is_rebalance_period:
-        report.append("🔄 *Monthly Check: ACTIVE*")
-    else:
-        report.append("🛡️ *Daily Safety Check Only*")
+    report.append(f"MODE: {'🔄 Monthly Rebalance' if is_rebalance_period else '🛡️ Daily Safety Check'}")
     report.append("------------------------")
     
     if holdings:
