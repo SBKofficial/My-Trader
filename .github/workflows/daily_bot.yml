@@ -1,0 +1,32 @@
+name: Daily Trading Bot
+
+on:
+  schedule:
+    # Runs at 3:30 AM UTC (9:00 AM India Standard Time) every Mon-Fri
+    - cron: '30 3 * * 1-5'
+  workflow_dispatch: # Allows manual trigger button
+
+permissions:
+  contents: write # CRITICAL: Allows the bot to save portfolio.json updates
+
+jobs:
+  run_bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: pip install yfinance pandas pandas_ta requests
+
+      - name: Run Trading Bot
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python run_bot.py
+
