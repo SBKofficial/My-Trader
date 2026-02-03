@@ -2,13 +2,9 @@
     "cash": 25000,
     "holdings": [
         {
-            "symbol": "COALINDIA",
-            "shares": 29
-        },
-        {
             "symbol": "VEDL",
             "shares": 18
         }
     ],
-    "last_update_id": 901159283
+    "last_update_id": 901159284
 }
