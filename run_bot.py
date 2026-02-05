@@ -10,7 +10,6 @@ import time
 from datetime import datetime
 
 # --- LOAD SECRETS ---
-# Ensure these are set in your Github Secrets or Environment Variables
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
@@ -170,11 +169,10 @@ def main():
 
     print(f"📊 Analyzing {len(all_tickers)} stocks...")
 
-    # Download Data (Robust Mode)
-    # Using threads=True for speed, but catching errors later
+    # Download Data (Robust Mode - FIXED: Using 2y for 200DMA)
     try:
-        data = yf.download(all_tickers, period="6mo", group_by='ticker', progress=False, threads=True)
-        nifty = yf.download("^NSEI", period="6mo", progress=False)
+        data = yf.download(all_tickers, period="2y", group_by='ticker', progress=False, threads=True)
+        nifty = yf.download("^NSEI", period="2y", progress=False)
     except Exception as e:
         print(f"❌ Critical Data Download Error: {e}")
         send_telegram(f"❌ Bot Failed: Data Download Error - {e}")
@@ -184,9 +182,15 @@ def main():
     try:
         if isinstance(nifty.columns, pd.MultiIndex): nifty.columns = nifty.columns.get_level_values(0)
         nifty['SMA_200'] = ta.sma(nifty['Close'], length=200)
-        market_safe = nifty['Close'].iloc[-1] > nifty['SMA_200'].iloc[-1]
-    except:
-        print("⚠️ Could not calculate Nifty 200DMA. Assuming Market Safe.")
+        
+        # Guard clause for Nifty Calculation
+        if pd.isna(nifty['SMA_200'].iloc[-1]):
+             print("⚠️ Nifty 200DMA is NaN (Not enough history?). Defaulting to Safe.")
+             market_safe = True
+        else:
+             market_safe = nifty['Close'].iloc[-1] > nifty['SMA_200'].iloc[-1]
+    except Exception as e:
+        print(f"⚠️ Nifty Analysis Failed: {e}. Assuming Market Safe.")
         market_safe = True
 
     # Calculate Ranks
@@ -213,8 +217,6 @@ def main():
 
             rank_scores[t.replace('.NS','')] = score
         except Exception as e:
-            # Silent continue is okay here to keep logs clean, but printing helps debug
-            # print(f"Skipping {t}: {e}")
             continue
 
     # Sort Ranks
@@ -240,6 +242,11 @@ def main():
                 
                 current = df['Close'].iloc[-1]
                 sma = ta.sma(df['Close'], length=200).iloc[-1]
+                
+                # Check for SMA Error
+                if pd.isna(sma):
+                    report.append(f"⚠️ {sym} (Error: Insufficient Data for 200DMA)")
+                    continue
 
                 # THE 3 RULES
                 if not market_safe:
@@ -268,8 +275,11 @@ def main():
                     df = data[f"{stock}.NS"].copy()
                     if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
                     
+                    sma_check = ta.sma(df['Close'], length=200).iloc[-1]
+                    if pd.isna(sma_check): continue
+
                     # Buy only if above 200 DMA
-                    if df['Close'].iloc[-1] > ta.sma(df['Close'], length=200).iloc[-1]:
+                    if df['Close'].iloc[-1] > sma_check:
                         report.append(f"👉 {stock} (Score: {score:.1f}%)")
                         count += 1
                 except: continue
