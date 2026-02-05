@@ -3,7 +3,7 @@ name: Daily Trading Bot
 on:
   schedule:
     # Runs at 3:30 AM UTC (9:00 AM India Standard Time) every Mon-Fri
-    - cron: '30 3 * * 1-5'
+    - cron: '0 11 * * 1-5'
   workflow_dispatch: # Allows manual trigger button
 
 permissions:
